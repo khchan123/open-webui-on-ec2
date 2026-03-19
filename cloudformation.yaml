@@ -367,6 +367,7 @@ Resources:
                   - wafv2:DeleteWebACL
                   - wafv2:UpdateWebACL
                   - wafv2:GetWebACL
+                  - wafv2:ListWebACLs
                   - wafv2:ListTagsForResource
                   - wafv2:TagResource
                 Resource: '*'
@@ -401,6 +402,11 @@ Resources:
               rules = json.loads(props['Rules'])
               if props.get('EnableNonCoreRules', 'false') == 'true':
                 rules.extend(json.loads(props.get('NonCoreRules', '[]')))
+              def find_acl(waf, name):
+                for acl in waf.list_web_acls(Scope='CLOUDFRONT', Limit=100).get('WebACLs', []):
+                  if acl['Name'] == name:
+                    return acl['ARN'], acl['Id']
+                return None, None
               if event['RequestType'] == 'Create':
                 r = waf.create_web_acl(
                   Name=name, Scope='CLOUDFRONT',
@@ -413,11 +419,12 @@ Resources:
                 arn = r['Summary']['ARN']
                 send(event, context, 'SUCCESS', {'Arn': arn}, arn)
               elif event['RequestType'] == 'Update':
-                arn = event['PhysicalResourceId']
-                acl = waf.get_web_acl(Name=name, Scope='CLOUDFRONT',
-                  Id=arn.split('/')[-1])
+                arn, acl_id = find_acl(waf, name)
+                if not arn:
+                  raise Exception(f'WebACL {name} not found')
+                acl = waf.get_web_acl(Name=name, Scope='CLOUDFRONT', Id=acl_id)
                 waf.update_web_acl(
-                  Name=name, Scope='CLOUDFRONT', Id=arn.split('/')[-1],
+                  Name=name, Scope='CLOUDFRONT', Id=acl_id,
                   LockToken=acl['LockToken'],
                   DefaultAction={'Allow': {}},
                   VisibilityConfig={'SampledRequestsEnabled': True,
@@ -426,14 +433,13 @@ Resources:
                   Rules=rules)
                 send(event, context, 'SUCCESS', {'Arn': arn}, arn)
               elif event['RequestType'] == 'Delete':
-                arn = event['PhysicalResourceId']
-                if arn and '/' in arn:
+                arn, acl_id = find_acl(waf, name)
+                if arn:
                   try:
-                    acl = waf.get_web_acl(Name=name, Scope='CLOUDFRONT',
-                      Id=arn.split('/')[-1])
+                    acl = waf.get_web_acl(Name=name, Scope='CLOUDFRONT', Id=acl_id)
                     waf.delete_web_acl(Name=name, Scope='CLOUDFRONT',
-                      Id=arn.split('/')[-1], LockToken=acl['LockToken'])
-                  except waf.exceptions.WAFNonexistentItemException:
+                      Id=acl_id, LockToken=acl['LockToken'])
+                  except Exception:
                     pass
                 send(event, context, 'SUCCESS')
             except Exception as e:
@@ -445,6 +451,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt WAFCustomResourceFn.Arn
       WebACLName: !Sub '${ResourcePrefix}-waf'
+      AccountId: !Ref 'AWS::AccountId'
       EnableNonCoreRules: !Ref EnableNonCoreWAFRules
       Rules: !Sub |
         [
