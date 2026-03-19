@@ -456,7 +456,7 @@ Resources:
               "ManagedRuleGroupStatement": {
                 "VendorName": "AWS",
                 "Name": "AWSManagedRulesCommonRuleSet",
-                "ExcludedRules": [{"Name": "SizeRestrictions_BODY"}]
+                "ExcludedRules": [{"Name": "SizeRestrictions_BODY"}, {"Name": "CrossSiteScripting_BODY"}]
               }
             },
             "VisibilityConfig": {
