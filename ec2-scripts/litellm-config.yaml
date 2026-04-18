@@ -1,5 +1,10 @@
 model_list:
   # Anthropic - Claude (JP/Global cross-region)
+  - model_name: claude-opus-4.7
+    litellm_params:
+      model: bedrock/global.anthropic.claude-opus-4-7
+      aws_region_name: ap-northeast-1
+
   - model_name: claude-sonnet-4.6
     litellm_params:
       model: bedrock/jp.anthropic.claude-sonnet-4-6

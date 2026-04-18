@@ -53,7 +53,7 @@ services:
       - "--storage.tsdb.retention.time=15d"
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:v0.8.12
     container_name: open-webui
     restart: always
     ports:
