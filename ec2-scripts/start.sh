@@ -16,10 +16,10 @@ mkdir -p "${APP_DIR}/postgres"
 mkdir -p "${APP_DIR}/prometheus/data"
 chown -R 65534:65534 "${APP_DIR}/prometheus"
 
-# Copy configs if not already present (preserve user edits on re-run)
-if [ ! -f "${APP_DIR}/litellm/config.yaml" ]; then
-  cp "${SCRIPT_DIR}/litellm-config.yaml" "${APP_DIR}/litellm/config.yaml"
-fi
+# Always update litellm config (model list changes with deploys)
+cp "${SCRIPT_DIR}/litellm-config.yaml" "${APP_DIR}/litellm/config.yaml"
+
+# Copy prometheus config if not already present (preserve user edits)
 if [ ! -f "${APP_DIR}/prometheus/prometheus.yml" ]; then
   cp "${SCRIPT_DIR}/prometheus.yml" "${APP_DIR}/prometheus/prometheus.yml"
 fi
@@ -32,6 +32,7 @@ WEBUI_SECRET_KEY=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
 EOF
 fi
+
 
 # Copy docker-compose and start
 cp "${SCRIPT_DIR}/docker-compose.yaml" "${APP_DIR}/docker-compose.yaml"
