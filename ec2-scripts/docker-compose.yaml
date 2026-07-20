@@ -16,7 +16,7 @@ services:
       retries: 10
 
   litellm:
-    image: docker.litellm.ai/berriai/litellm:main-stable
+    image: docker.litellm.ai/berriai/litellm:v1.93.0
     container_name: litellm
     restart: always
     ports:
@@ -27,6 +27,11 @@ services:
       - DATABASE_URL=postgresql://llmproxy:${POSTGRES_PASSWORD}@db:5432/litellm
       - STORE_MODEL_IN_DB=True
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      # Bedrock API key (bearer token) for GPT-5.6 models via the bedrock-mantle endpoint.
+      # IAM role auth does not cover mantle; leave blank to disable the GPT-5.6 models.
+      # Use a LONG-TERM key: short-term keys embed a presigned signature that expires
+      # (<=12h) and the proxy then fails with "invalid_api_key: Signature expired".
+      - BEDROCK_MANTLE_API_KEY=${BEDROCK_MANTLE_API_KEY}
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     depends_on:
       db:
@@ -53,7 +58,7 @@ services:
       - "--storage.tsdb.retention.time=15d"
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.9.6
+    image: ghcr.io/open-webui/open-webui:v0.10.2
     container_name: open-webui
     restart: always
     ports:

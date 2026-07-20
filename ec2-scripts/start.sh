@@ -30,7 +30,16 @@ if [ ! -f "${APP_DIR}/.env" ]; then
 LITELLM_MASTER_KEY=sk-litellm-master-key
 WEBUI_SECRET_KEY=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
+# Bedrock API key for GPT-5.6 models (bedrock-mantle endpoint). Set this to a
+# valid Bedrock bearer token to enable the gpt-5.6-* models; leave blank otherwise.
+BEDROCK_MANTLE_API_KEY=
 EOF
+fi
+
+# Ensure BEDROCK_MANTLE_API_KEY exists in pre-existing .env files (added after
+# initial provisioning) so docker compose does not warn on the unset variable.
+if ! grep -q '^BEDROCK_MANTLE_API_KEY=' "${APP_DIR}/.env"; then
+  echo 'BEDROCK_MANTLE_API_KEY=' >> "${APP_DIR}/.env"
 fi
 
 
