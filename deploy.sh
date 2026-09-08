@@ -12,13 +12,16 @@ set -euo pipefail
 DOMAIN_NAME=""
 ACM_CERT_ARN=""
 
+# --- Optional: Hermes WebUI subdomain (covered by ACM_CERT_ARN). Empty = skip. ---
+HERMES_DOMAIN_NAME=""
+
 # --- Optional: override defaults ---
 STACK_NAME="open-webui"
 REGION="ap-east-1"
 RESOURCE_PREFIX="open-webui"
 INSTANCE_TYPE="t4g.medium"
 AZ_SUFFIX="a"
-ROOT_VOLUME_SIZE="30"
+ROOT_VOLUME_SIZE="100"
 DATA_VOLUME_SIZE="30"
 AWS_PROFILE=""
 
@@ -74,14 +77,46 @@ if [[ "$REFRESH_ONLY" == "false" ]]; then
   PARAMS="ParameterKey=ResourcePrefix,ParameterValue=$RESOURCE_PREFIX \
     ParameterKey=AlternateDomainName,ParameterValue=$DOMAIN_NAME \
     ParameterKey=AcmCertificateArn,ParameterValue=$ACM_CERT_ARN \
+    ParameterKey=HermesDomainName,ParameterValue=$HERMES_DOMAIN_NAME \
     ParameterKey=InstanceType,ParameterValue=$INSTANCE_TYPE \
     ParameterKey=AvailabilityZoneSuffix,ParameterValue=$AZ_SUFFIX \
-    ParameterKey=RootVolumeSize,ParameterValue=$ROOT_VOLUME_SIZE \
     ParameterKey=DataVolumeSize,ParameterValue=$DATA_VOLUME_SIZE \
     ParameterKey=AdminCidr,ParameterValue=$ADMIN_CIDR"
 
   STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
     --query "Stacks[0].StackStatus" --output text $PROFILE_ARG 2>/dev/null || echo "DOES_NOT_EXIST")
+
+  # Pin the AMI on updates to the running instance's current image. The template
+  # defaults ImageId to the latest AL2023 AMI from SSM; on an update that alias
+  # re-resolves to a newer AMI and forces an instance replacement (which fails on
+  # the attached data volume and wipes the root disk). Passing the live AMI keeps
+  # ImageId unchanged. New stacks pass empty -> template uses SSM latest.
+  EC2_IMAGE_ID=""
+  if [[ "$STACK_STATUS" != "DOES_NOT_EXIST" ]]; then
+    EXISTING_EC2_ID=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+      --query "Stacks[0].Outputs[?OutputKey=='EC2InstanceId'].OutputValue" --output text $PROFILE_ARG 2>/dev/null || echo "")
+    if [[ -n "$EXISTING_EC2_ID" && "$EXISTING_EC2_ID" != "None" ]]; then
+      EC2_IMAGE_ID=$(aws ec2 describe-instances --instance-ids "$EXISTING_EC2_ID" --region "$REGION" \
+        --query "Reservations[0].Instances[0].ImageId" --output text $PROFILE_ARG 2>/dev/null || echo "")
+      echo "Pinning EC2 AMI to running instance's image: ${EC2_IMAGE_ID:-<none, will use SSM latest>}"
+    fi
+  fi
+  PARAMS="$PARAMS ParameterKey=Ec2ImageId,ParameterValue=$EC2_IMAGE_ID"
+
+  # Root volume size: NEVER change it on an existing instance via CloudFormation.
+  # Ebs.VolumeSize lives in the instance's BlockDeviceMappings, and AWS only allows
+  # live-modifying DeleteOnTermination there — changing the size forces a full
+  # instance REPLACEMENT (wipes the root disk, fails on the attached data volume).
+  # CloudFormation diffs the new parameter against the value it last applied, not the
+  # actual disk, so once the root has been grown out-of-band (EBS ModifyVolume +
+  # growpart + xfs_growfs) we must keep feeding CloudFormation its previous value or
+  # the next deploy would try to "shrink/grow" it and replace the box. New stacks use
+  # ROOT_VOLUME_SIZE; grow a live root out-of-band, not through this template.
+  if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
+    PARAMS="$PARAMS ParameterKey=RootVolumeSize,ParameterValue=$ROOT_VOLUME_SIZE"
+  else
+    PARAMS="$PARAMS ParameterKey=RootVolumeSize,UsePreviousValue=true"
+  fi
 
   IS_NEW_STACK=false
   if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
@@ -143,6 +178,12 @@ EC2_IP=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region 
   --query "Stacks[0].Outputs[?OutputKey=='EC2PublicIp'].OutputValue" --output text $PROFILE_ARG)
 echo "  Open WebUI: https://$DOMAIN_NAME"
 echo "  LiteLLM:    http://$EC2_IP:4000/ui"
+if [[ -n "$HERMES_DOMAIN_NAME" ]]; then
+  HERMES_CF=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+    --query "Stacks[0].Outputs[?OutputKey=='HermesCloudFrontDomainName'].OutputValue" --output text $PROFILE_ARG)
+  echo "  Hermes:     https://$HERMES_DOMAIN_NAME  (CNAME -> $HERMES_CF)"
+  echo "  Hermes WebUI login password is in /mnt/app/.env (HERMES_WEBUI_PASSWORD) on the instance."
+fi
 
 if [[ "${IS_NEW_STACK:-false}" == "true" ]]; then
   echo ""

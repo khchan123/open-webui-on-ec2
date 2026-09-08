@@ -76,3 +76,56 @@ services:
     depends_on:
       litellm:
         condition: service_healthy
+
+  # Hermes agent (gateway API on :8642, internal to the compose network only).
+  # Shares the litellm proxy above via the compose network (http://litellm:4000).
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    restart: always
+    command: ["gateway", "run"]
+    volumes:
+      # Shared config/state root (also mounted by hermes-webui). Bind-mounted so
+      # start.sh can pre-seed config.yaml. Persisted on the /mnt/app data volume.
+      - ./hermes-home:/home/hermes/.hermes
+      # Agent source, seeded from the image; hermes-webui mounts it read-only and
+      # pip-installs it at boot. Named volume lives on the root disk (re-seedable).
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/home/hermes/.hermes
+      - HERMES_UID=1000
+      - HERMES_GID=1000
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${API_SERVER_KEY}
+    depends_on:
+      litellm:
+        condition: service_healthy
+
+  # Hermes WebUI (port 8787). Runs the agent in-process for chat, reading the
+  # shared config.yaml; the gateway container above is used for its Tasks/health
+  # probe. Fronted by its own CloudFront distribution + WAF + password auth.
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    restart: always
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./hermes-home:/home/hermeswebui/.hermes
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
+      - ./hermes-workspace:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      - HERMES_API_URL=http://hermes-agent:8642
+      - WANTED_UID=1000
+      - WANTED_GID=1000
+      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY}
+      - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD}
+    depends_on:
+      - hermes-agent
+
+volumes:
+  hermes-agent-src:

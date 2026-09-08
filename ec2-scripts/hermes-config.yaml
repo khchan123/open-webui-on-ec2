@@ -1,0 +1,13 @@
+# Seed config for the Hermes agent. start.sh copies this into the shared
+# hermes-home volume on first run, substituting __LITELLM_MASTER_KEY__ with the
+# instance's real LiteLLM master key so the api_key always matches. Points
+# Hermes at the local LiteLLM proxy (same one Open WebUI uses), which fronts
+# Amazon Bedrock. Change the default model or edit in the WebUI as needed.
+model:
+  provider: "custom"
+  base_url: "http://litellm:4000/v1"
+  api_key: "__LITELLM_MASTER_KEY__"
+  default: "claude-opus-4.8"
+  # LiteLLM proxies Bedrock; set context window explicitly rather than relying
+  # on /v1/models auto-detection.
+  context_length: 200000

@@ -23,10 +23,27 @@ Parameters:
     Description: ARN of the ACM certificate in us-east-1 for CloudFront SSL
     AllowedPattern: ^arn:aws:acm:us-east-1:\d{12}:certificate\/[a-f0-9\-]+$
 
+  HermesDomainName:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional alternate domain name for the Hermes WebUI CloudFront distribution
+      (must be covered by AcmCertificateArn). Leave empty to skip the Hermes
+      distribution and its port-8787 ingress rule.
+
   InstanceType:
     Type: String
     Default: t4g.medium
     Description: EC2 instance type
+
+  Ec2ImageId:
+    Type: String
+    Default: ''
+    Description: >-
+      AMI for the EC2 instance. Leave empty to use the latest AL2023 arm64 AMI
+      from SSM (intended for first create / deliberate re-image). deploy.sh pins
+      this to the running instance's current AMI on updates so a refresh never
+      triggers an instance replacement.
 
   VpcCidr:
     Type: String
@@ -46,8 +63,15 @@ Parameters:
 
   RootVolumeSize:
     Type: Number
-    Default: 30
-    Description: Root EBS volume size in GB
+    Default: 100
+    Description: >-
+      Root EBS volume size in GB, used on stack CREATE. Docker images accumulate
+      across Open WebUI / Hermes upgrades (stale layers are not auto-pruned), so
+      30 GB fills up and deadlocks cloud-init; 100 GB leaves comfortable headroom.
+      WARNING: changing this on a running instance forces a full instance
+      REPLACEMENT (AWS only allows live-modifying DeleteOnTermination on the root
+      block device). deploy.sh pins this to the previous value on updates; grow a
+      live root out-of-band via EBS ModifyVolume + growpart + xfs_growfs instead.
 
   DataVolumeSize:
     Type: Number
@@ -74,6 +98,8 @@ Parameters:
 # ============================================================================
 Conditions:
   HasAdminCidr: !Not [!Equals [!Ref AdminCidr, '']]
+  HasHermesDomain: !Not [!Equals [!Ref HermesDomainName, '']]
+  UseLatestAmi: !Equals [!Ref Ec2ImageId, '']
 
 # ============================================================================
 # Mappings - CloudFront managed prefix list IDs per region
@@ -186,6 +212,31 @@ Resources:
       CidrIp: !Ref AdminCidr
       Description: Admin access for troubleshooting
 
+  # Hermes port 8787 ingress lives in its own security group: a rule that
+  # references the CloudFront managed prefix list counts as the prefix list's
+  # full size (~60 entries) toward the 60-rules-per-SG limit, so a second such
+  # rule cannot fit in EC2SecurityGroup. A separate SG (also attached to the
+  # instance) sidesteps the per-SG limit without a quota increase.
+  HermesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: HasHermesDomain
+    Properties:
+      GroupDescription: !Sub '${ResourcePrefix} Hermes SG - CloudFront port 8787'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8787
+          ToPort: 8787
+          SourcePrefixListId: !FindInMap [CloudFrontPrefixListId, !Ref 'AWS::Region', PrefixListId]
+          Description: Allow port 8787 from CloudFront (Hermes WebUI)
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-hermes-sg'
+
   # ==========================================================================
   # S3 Bucket for EC2 scripts
   # ==========================================================================
@@ -278,10 +329,21 @@ Resources:
     DependsOn: PublicRoute
     Properties:
       InstanceType: !Ref InstanceType
-      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
+      # On create, resolves the latest AL2023 arm64 AMI from SSM. On updates the
+      # {{resolve:ssm}} alias would re-resolve to a newer AMI and force an
+      # instance REPLACEMENT (which fails on the already-attached data volume and
+      # wipes the root disk). deploy.sh guards against this by passing
+      # Ec2ImageId=<running instance's current AMI> on every update, so ImageId
+      # stays unchanged. Leave Ec2ImageId empty to intentionally re-image.
+      ImageId: !If
+        - UseLatestAmi
+        - !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}'
+        - !Ref Ec2ImageId
       SubnetId: !Ref PublicSubnet
-      SecurityGroupIds:
-        - !Ref EC2SecurityGroup
+      SecurityGroupIds: !If
+        - HasHermesDomain
+        - [!Ref EC2SecurityGroup, !Ref HermesSecurityGroup]
+        - [!Ref EC2SecurityGroup]
       IamInstanceProfile: !Ref EC2InstanceProfile
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
@@ -578,6 +640,60 @@ Resources:
         - Key: Name
           Value: !Sub '${ResourcePrefix}-distribution'
 
+  # ==========================================================================
+  # Hermes WebUI CloudFront Distribution (optional; port 8787 origin)
+  # Reuses the same WAF WebACL and ACM certificate as the Open WebUI distro.
+  # ==========================================================================
+  HermesCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: HasHermesDomain
+    DependsOn: ElasticIPAssociation
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${ResourcePrefix} hermes distribution'
+        PriceClass: PriceClass_All
+        Aliases:
+          - !Ref HermesDomainName
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        WebACLId: !GetAtt WAFWebACL.Arn
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        DefaultCacheBehavior:
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          # CachingDisabled managed cache policy
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          # AllViewer managed origin request policy
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          TargetOriginId: !Sub '${ResourcePrefix}-hermes-origin'
+          Compress: true
+        Origins:
+          - Id: !Sub '${ResourcePrefix}-hermes-origin'
+            DomainName: !GetAtt EC2Instance.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 8787
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 30
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-hermes-distribution'
+
 # ============================================================================
 # Outputs
 # ============================================================================
@@ -585,6 +701,11 @@ Outputs:
   CloudFrontDomainName:
     Description: CloudFront domain name - point your DNS CNAME here
     Value: !GetAtt CloudFrontDistribution.DomainName
+
+  HermesCloudFrontDomainName:
+    Condition: HasHermesDomain
+    Description: Hermes CloudFront domain name - point the Hermes DNS CNAME here
+    Value: !GetAtt HermesCloudFrontDistribution.DomainName
 
   CloudFrontDistributionId:
     Description: CloudFront distribution ID
