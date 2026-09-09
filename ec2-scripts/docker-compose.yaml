@@ -118,7 +118,10 @@ services:
       - WANTED_UID=1000
       - WANTED_GID=1000
       - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY}
-      - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD}
+      # HERMES_WEBUI_PASSWORD intentionally unset: the login password is
+      # managed in the WebUI (Settings) and persisted, hashed, in
+      # hermes-home/webui/settings.json. Setting it here would override and
+      # lock out the UI-managed password (env var wins in auth.py).
     depends_on:
       - hermes-agent
 

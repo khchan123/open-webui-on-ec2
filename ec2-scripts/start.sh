@@ -39,14 +39,14 @@ POSTGRES_PASSWORD=$(openssl rand -hex 16)
 EOF
 fi
 
-# Hermes secrets (added to pre-existing .env files on upgrade):
-#   API_SERVER_KEY        - enables the agent gateway API (must be >=16 chars)
-#   HERMES_WEBUI_PASSWORD - WebUI login password (it is network-exposed)
+# Hermes gateway secret (added to pre-existing .env files on upgrade):
+#   API_SERVER_KEY - enables the agent gateway API (must be >=16 chars)
+# NOTE: the WebUI login password is intentionally NOT set here. With
+# HERMES_WEBUI_PASSWORD unset, hermes-webui manages the password itself
+# (Settings -> stored hashed in hermes-home/webui/settings.json), so it
+# survives restarts and can be changed in the UI. See docker-compose.yaml.
 if ! grep -q '^API_SERVER_KEY=' "${APP_DIR}/.env"; then
   echo "API_SERVER_KEY=$(openssl rand -hex 24)" >> "${APP_DIR}/.env"
-fi
-if ! grep -q '^HERMES_WEBUI_PASSWORD=' "${APP_DIR}/.env"; then
-  echo "HERMES_WEBUI_PASSWORD=$(openssl rand -hex 12)" >> "${APP_DIR}/.env"
 fi
 
 # Seed the Hermes agent config on first run only (preserve manual edits after).
