@@ -69,26 +69,8 @@ Edit `ec2-scripts/litellm-config.yaml` to add/remove models. After changes:
 ./deploy.sh --refresh
 ```
 
-Most models route through the standard Bedrock Converse path (`bedrock/...`) using
+All models route through the standard Bedrock Converse path (`bedrock/...`) using
 the instance IAM role.
-
-### GPT-5.6 (bedrock-mantle)
-
-The **GPT-5.6** models (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) run on the
-newer `bedrock-mantle` endpoint (us-east-1, Responses API only) and require a
-**Bedrock API key** rather than the IAM role. Set `BEDROCK_MANTLE_API_KEY` in
-`/mnt/app/.env` on the instance to enable them; leave it blank to disable them.
-
-Use a **long-term** Bedrock API key (tied to an IAM user, no expiry until revoked),
-not a short-term one. Short-term keys embed a presigned signature that expires
-(≤12h), and the proxy will fail with `invalid_api_key: Signature expired ...` once
-it lapses. After updating the key:
-
-```bash
-# on the EC2 instance
-sed -i 's|^BEDROCK_MANTLE_API_KEY=.*|BEDROCK_MANTLE_API_KEY=<key>|' /mnt/app/.env
-cd /mnt/app && docker compose up -d litellm
-```
 
 ### Data-retention opt-in (Fable 5 / Mythos 5)
 
