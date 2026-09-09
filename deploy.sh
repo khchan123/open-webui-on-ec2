@@ -182,7 +182,7 @@ if [[ -n "$HERMES_DOMAIN_NAME" ]]; then
   HERMES_CF=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
     --query "Stacks[0].Outputs[?OutputKey=='HermesCloudFrontDomainName'].OutputValue" --output text $PROFILE_ARG)
   echo "  Hermes:     https://$HERMES_DOMAIN_NAME  (CNAME -> $HERMES_CF)"
-  echo "  Hermes WebUI login password is in /mnt/app/.env (HERMES_WEBUI_PASSWORD) on the instance."
+  echo "  Hermes WebUI login password is managed in the WebUI (Settings), stored hashed on the data volume."
 fi
 
 if [[ "${IS_NEW_STACK:-false}" == "true" ]]; then
