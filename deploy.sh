@@ -12,8 +12,15 @@ set -euo pipefail
 DOMAIN_NAME=""
 ACM_CERT_ARN=""
 
-# --- Optional: Hermes WebUI subdomain (covered by ACM_CERT_ARN). Empty = skip. ---
+# --- Optional: Hermes WebUI subdomain (covered by ACM_CERT_ARN). Empty = serve
+#     on the default *.cloudfront.net domain (set HERMES_ENABLED=true to deploy
+#     Hermes without a custom domain). ---
 HERMES_DOMAIN_NAME=""
+HERMES_ENABLED=""
+
+# --- Optional: create the data volume from an existing EBS snapshot. Empty =
+#     fresh empty volume. ---
+DATA_VOLUME_SNAPSHOT_ID=""
 
 # --- Optional: override defaults ---
 STACK_NAME="open-webui"
@@ -25,17 +32,19 @@ ROOT_VOLUME_SIZE="100"
 DATA_VOLUME_SIZE="30"
 AWS_PROFILE=""
 
-# Load overrides from .env if present
-if [[ -f .env ]]; then
+# Load overrides from an env file if present (override which one via DEPLOY_ENV)
+ENV_FILE="${DEPLOY_ENV:-.env}"
+if [[ -f "$ENV_FILE" ]]; then
   set -a
-  source .env
+  source "$ENV_FILE"
   set +a
 fi
 
 # ============================================================================
 # Validation
 # ============================================================================
-if [[ -z "$DOMAIN_NAME" ]]; then echo "ERROR: DOMAIN_NAME required."; exit 1; fi
+# DOMAIN_NAME may be empty: the distribution then serves on its *.cloudfront.net
+# domain (default certificate) with no custom alias.
 if [[ -z "$ACM_CERT_ARN" ]]; then echo "ERROR: ACM_CERT_ARN required."; exit 1; fi
 
 TEMPLATE_FILE="cloudformation.yaml"
@@ -78,6 +87,7 @@ if [[ "$REFRESH_ONLY" == "false" ]]; then
     ParameterKey=AlternateDomainName,ParameterValue=$DOMAIN_NAME \
     ParameterKey=AcmCertificateArn,ParameterValue=$ACM_CERT_ARN \
     ParameterKey=HermesDomainName,ParameterValue=$HERMES_DOMAIN_NAME \
+    ParameterKey=HermesEnabled,ParameterValue=${HERMES_ENABLED:-false} \
     ParameterKey=InstanceType,ParameterValue=$INSTANCE_TYPE \
     ParameterKey=AvailabilityZoneSuffix,ParameterValue=$AZ_SUFFIX \
     ParameterKey=DataVolumeSize,ParameterValue=$DATA_VOLUME_SIZE \
@@ -118,6 +128,15 @@ if [[ "$REFRESH_ONLY" == "false" ]]; then
     PARAMS="$PARAMS ParameterKey=RootVolumeSize,UsePreviousValue=true"
   fi
 
+  # DataVolumeSnapshotId only applies when the volume is first created; a volume's
+  # SnapshotId cannot change in place, so keep the previous value on updates (a
+  # changed value would force a volume replacement).
+  if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
+    PARAMS="$PARAMS ParameterKey=DataVolumeSnapshotId,ParameterValue=$DATA_VOLUME_SNAPSHOT_ID"
+  else
+    PARAMS="$PARAMS ParameterKey=DataVolumeSnapshotId,UsePreviousValue=true"
+  fi
+
   IS_NEW_STACK=false
   if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
     IS_NEW_STACK=true
@@ -151,7 +170,7 @@ if [[ "$REFRESH_ONLY" == "true" || "${IS_NEW_STACK:-false}" == "true" || "$MODE"
     --query "Stacks[0].Outputs[?OutputKey=='EC2InstanceId'].OutputValue" --output text $PROFILE_ARG)
   echo "Running setup on EC2 $EC2_ID via SSM..."
   COMMAND_ID=$(aws ssm send-command --instance-ids "$EC2_ID" --document-name "AWS-RunShellScript" \
-    --parameters "commands=['aws s3 cp s3://${SCRIPTS_BUCKET}/scripts/setup.sh /tmp/setup.sh --region ${REGION}','chmod +x /tmp/setup.sh','/tmp/setup.sh']" \
+    --parameters "commands=['aws s3 cp s3://${SCRIPTS_BUCKET}/scripts/setup.sh /tmp/setup.sh --region ${REGION}','chmod +x /tmp/setup.sh','/tmp/setup.sh ${SCRIPTS_BUCKET}']" \
     --region "$REGION" --output text --query "Command.CommandId" $PROFILE_ARG)
   echo "SSM command sent: $COMMAND_ID"
   echo "Waiting for completion..."
@@ -176,12 +195,22 @@ echo ""
 echo "Done."
 EC2_IP=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
   --query "Stacks[0].Outputs[?OutputKey=='EC2PublicIp'].OutputValue" --output text $PROFILE_ARG)
-echo "  Open WebUI: https://$DOMAIN_NAME"
+CF_DOMAIN=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDomainName'].OutputValue" --output text $PROFILE_ARG)
+if [[ -n "$DOMAIN_NAME" ]]; then
+  echo "  Open WebUI: https://$DOMAIN_NAME  (CNAME -> $CF_DOMAIN)"
+else
+  echo "  Open WebUI: https://$CF_DOMAIN  (no custom domain)"
+fi
 echo "  LiteLLM:    http://$EC2_IP:4000/ui"
-if [[ -n "$HERMES_DOMAIN_NAME" ]]; then
+if [[ "${HERMES_ENABLED:-false}" == "true" || -n "$HERMES_DOMAIN_NAME" ]]; then
   HERMES_CF=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" \
     --query "Stacks[0].Outputs[?OutputKey=='HermesCloudFrontDomainName'].OutputValue" --output text $PROFILE_ARG)
-  echo "  Hermes:     https://$HERMES_DOMAIN_NAME  (CNAME -> $HERMES_CF)"
+  if [[ -n "$HERMES_DOMAIN_NAME" ]]; then
+    echo "  Hermes:     https://$HERMES_DOMAIN_NAME  (CNAME -> $HERMES_CF)"
+  else
+    echo "  Hermes:     https://$HERMES_CF  (no custom domain)"
+  fi
   echo "  Hermes WebUI login password is managed in the WebUI (Settings), stored hashed on the data volume."
 fi
 

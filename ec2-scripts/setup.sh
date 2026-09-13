@@ -7,11 +7,14 @@ set -euxo pipefail
 # Assumes Docker and /mnt/app volume are already set up by EC2 UserData.
 # ============================================================================
 
-# Resolve S3 bucket and region from instance metadata
+# Resolve region from instance metadata
 TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
 AWS_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
 ACCOUNT_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/dynamic/instance-identity/document | grep accountId | awk -F'"' '{print $4}')
-S3_BUCKET="open-webui-ec2-scripts-${ACCOUNT_ID}-${AWS_REGION}"
+
+# Scripts bucket: passed as $1 by deploy.sh (embeds the stack's resource prefix).
+# Falls back to the default prefix for backward compatibility.
+S3_BUCKET="${1:-open-webui-ec2-scripts-${ACCOUNT_ID}-${AWS_REGION}}"
 
 # Download scripts from S3
 mkdir -p /mnt/app/scripts

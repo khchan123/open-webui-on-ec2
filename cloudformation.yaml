@@ -15,8 +15,11 @@ Parameters:
 
   AlternateDomainName:
     Type: String
-    Description: Alternate domain name (CNAME) for CloudFront distribution
-    AllowedPattern: ^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$
+    Default: ''
+    Description: >-
+      Alternate domain name (CNAME) for the CloudFront distribution. Leave empty
+      to serve on the default *.cloudfront.net domain (default certificate).
+    AllowedPattern: ^$|^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$
 
   AcmCertificateArn:
     Type: String
@@ -28,8 +31,19 @@ Parameters:
     Default: ''
     Description: >-
       Optional alternate domain name for the Hermes WebUI CloudFront distribution
-      (must be covered by AcmCertificateArn). Leave empty to skip the Hermes
-      distribution and its port-8787 ingress rule.
+      (must be covered by AcmCertificateArn). Leave empty to serve the Hermes
+      distribution on its default *.cloudfront.net domain (default certificate).
+
+  HermesEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >-
+      Whether to deploy the Hermes WebUI (agent + WebUI containers, port-8787
+      ingress, and its CloudFront distribution). Also enabled implicitly when
+      HermesDomainName is set.
 
   InstanceType:
     Type: String
@@ -78,6 +92,14 @@ Parameters:
     Default: 30
     Description: Data EBS volume size in GB (mounted at /mnt/app, retained on stack delete)
 
+  DataVolumeSnapshotId:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional EBS snapshot ID to create the data volume from. Leave empty to
+      create a fresh (empty) volume. If set, DataVolumeSize must be >= the
+      snapshot's volume size.
+
   AdminCidr:
     Type: String
     Default: ''
@@ -98,7 +120,10 @@ Parameters:
 # ============================================================================
 Conditions:
   HasAdminCidr: !Not [!Equals [!Ref AdminCidr, '']]
+  HasAlternateDomain: !Not [!Equals [!Ref AlternateDomainName, '']]
   HasHermesDomain: !Not [!Equals [!Ref HermesDomainName, '']]
+  DeployHermes: !Or [!Equals [!Ref HermesEnabled, 'true'], !Not [!Equals [!Ref HermesDomainName, '']]]
+  HasDataSnapshot: !Not [!Equals [!Ref DataVolumeSnapshotId, '']]
   UseLatestAmi: !Equals [!Ref Ec2ImageId, '']
 
 # ============================================================================
@@ -219,7 +244,7 @@ Resources:
   # instance) sidesteps the per-SG limit without a quota increase.
   HermesSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    Condition: HasHermesDomain
+    Condition: DeployHermes
     Properties:
       GroupDescription: !Sub '${ResourcePrefix} Hermes SG - CloudFront port 8787'
       VpcId: !Ref VPC
@@ -308,6 +333,7 @@ Resources:
     Properties:
       AvailabilityZone: !Sub '${AWS::Region}${AvailabilityZoneSuffix}'
       Size: !Ref DataVolumeSize
+      SnapshotId: !If [HasDataSnapshot, !Ref DataVolumeSnapshotId, !Ref 'AWS::NoValue']
       VolumeType: gp3
       Encrypted: true
       Tags:
@@ -341,7 +367,7 @@ Resources:
         - !Ref Ec2ImageId
       SubnetId: !Ref PublicSubnet
       SecurityGroupIds: !If
-        - HasHermesDomain
+        - DeployHermes
         - [!Ref EC2SecurityGroup, !Ref HermesSecurityGroup]
         - [!Ref EC2SecurityGroup]
       IamInstanceProfile: !Ref EC2InstanceProfile
@@ -356,13 +382,20 @@ Resources:
           #!/bin/bash
           set -euxo pipefail
 
-          # Wait for data volume
-          while [ ! -e /dev/xvdf ] && [ ! -e /dev/nvme1n1 ]; do sleep 1; done
-          DATA_DEV=$(readlink -f /dev/xvdf 2>/dev/null || echo /dev/nvme1n1)
+          # Identify and mount the data volume. Device naming varies by instance
+          # type / AMI (xvdf vs nvme*), so pick the disk that is NOT the root disk
+          # rather than assuming a fixed path.
+          ROOT_DISK=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)")
+          while true; do
+            DATA_DEV=$(lsblk -dpno NAME | grep -vx "/dev/$ROOT_DISK" | head -1)
+            [ -n "$DATA_DEV" ] && [ -b "$DATA_DEV" ] && break
+            sleep 1
+          done
           if ! blkid "$DATA_DEV"; then mkfs.xfs "$DATA_DEV"; fi
           mkdir -p /mnt/app
           mount "$DATA_DEV" /mnt/app
-          grep -q '/mnt/app' /etc/fstab || echo "$DATA_DEV /mnt/app xfs defaults,nofail 0 2" >> /etc/fstab
+          DATA_UUID=$(blkid -s UUID -o value "$DATA_DEV")
+          grep -q "$DATA_UUID" /etc/fstab || echo "UUID=$DATA_UUID /mnt/app xfs defaults,nofail 0 2" >> /etc/fstab
           chown ec2-user:ec2-user /mnt/app
 
           # Install cronie (crontab) - not included in AL2023 by default
@@ -599,12 +632,16 @@ Resources:
         Enabled: true
         Comment: !Sub '${ResourcePrefix} distribution'
         PriceClass: PriceClass_All
-        Aliases:
-          - !Ref AlternateDomainName
-        ViewerCertificate:
-          AcmCertificateArn: !Ref AcmCertificateArn
-          SslSupportMethod: sni-only
-          MinimumProtocolVersion: TLSv1.2_2021
+        Aliases: !If
+          - HasAlternateDomain
+          - [!Ref AlternateDomainName]
+          - !Ref 'AWS::NoValue'
+        ViewerCertificate: !If
+          - HasAlternateDomain
+          - AcmCertificateArn: !Ref AcmCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
         WebACLId: !GetAtt WAFWebACL.Arn
         HttpVersion: http2and3
         IPV6Enabled: true
@@ -646,19 +683,23 @@ Resources:
   # ==========================================================================
   HermesCloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
-    Condition: HasHermesDomain
+    Condition: DeployHermes
     DependsOn: ElasticIPAssociation
     Properties:
       DistributionConfig:
         Enabled: true
         Comment: !Sub '${ResourcePrefix} hermes distribution'
         PriceClass: PriceClass_All
-        Aliases:
-          - !Ref HermesDomainName
-        ViewerCertificate:
-          AcmCertificateArn: !Ref AcmCertificateArn
-          SslSupportMethod: sni-only
-          MinimumProtocolVersion: TLSv1.2_2021
+        Aliases: !If
+          - HasHermesDomain
+          - [!Ref HermesDomainName]
+          - !Ref 'AWS::NoValue'
+        ViewerCertificate: !If
+          - HasHermesDomain
+          - AcmCertificateArn: !Ref AcmCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
         WebACLId: !GetAtt WAFWebACL.Arn
         HttpVersion: http2and3
         IPV6Enabled: true
@@ -703,7 +744,7 @@ Outputs:
     Value: !GetAtt CloudFrontDistribution.DomainName
 
   HermesCloudFrontDomainName:
-    Condition: HasHermesDomain
+    Condition: DeployHermes
     Description: Hermes CloudFront domain name - point the Hermes DNS CNAME here
     Value: !GetAtt HermesCloudFrontDistribution.DomainName
 
