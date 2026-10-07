@@ -75,7 +75,7 @@ services:
   # Hermes agent (gateway API on :8642, internal to the compose network only).
   # Shares the litellm proxy above via the compose network (http://litellm:4000).
   hermes-agent:
-    image: nousresearch/hermes-agent:latest
+    image: nousresearch/hermes-agent:v2026.9.24
     container_name: hermes-agent
     restart: always
     command: ["gateway", "run"]
@@ -84,7 +84,8 @@ services:
       # start.sh can pre-seed config.yaml. Persisted on the /mnt/app data volume.
       - ./hermes-home:/home/hermes/.hermes
       # Agent source, seeded from the image; hermes-webui mounts it read-only and
-      # pip-installs it at boot. Named volume lives on the root disk (re-seedable).
+      # pip-installs it at boot. Named volume lives on the root disk (re-seedable;
+      # start.sh re-seeds it whenever the agent image changes).
       - hermes-agent-src:/opt/hermes
     environment:
       - HERMES_HOME=/home/hermes/.hermes
@@ -101,7 +102,7 @@ services:
   # shared config.yaml; the gateway container above is used for its Tasks/health
   # probe. Fronted by its own CloudFront distribution + WAF + password auth.
   hermes-webui:
-    image: ghcr.io/nesquena/hermes-webui:latest
+    image: ghcr.io/nesquena/hermes-webui:0.52.432
     container_name: hermes-webui
     restart: always
     ports:

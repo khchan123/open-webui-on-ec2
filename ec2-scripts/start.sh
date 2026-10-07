@@ -66,6 +66,19 @@ cp "${SCRIPT_DIR}/docker-compose.yaml" "${APP_DIR}/docker-compose.yaml"
 
 cd "${APP_DIR}"
 docker compose down --remove-orphans 2>/dev/null || true
+
+# Docker seeds the hermes-agent-src named volume from the image only while the
+# volume is empty, so after an image upgrade the old agent source would keep
+# running. Drop the volume whenever the agent image changes so it re-seeds.
+AGENT_IMAGE=$(docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["hermes-agent"]["image"])')
+docker pull -q "${AGENT_IMAGE}"
+AGENT_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${AGENT_IMAGE}")
+AGENT_SEED_MARKER="${APP_DIR}/.hermes-agent-src-image"
+if [ "$(cat "${AGENT_SEED_MARKER}" 2>/dev/null)" != "${AGENT_IMAGE_ID}" ]; then
+  docker volume rm -f "$(basename "${APP_DIR}")_hermes-agent-src"
+  echo "${AGENT_IMAGE_ID}" > "${AGENT_SEED_MARKER}"
+fi
+
 docker compose up -d
 
 echo ""
